@@ -1,4 +1,4 @@
-# harms-asr
+# asr-protocol
 
 Protocol and scripts for generating ancestral proteins in the Harms lab.  This
 is under heavy development and may change rather sigificantly.  One likely
