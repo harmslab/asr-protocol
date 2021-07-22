@@ -1,0 +1,21 @@
+#!/bin/bash -l
+#SBATCH --account=harmslab      ### change this to your actual account for charging
+#SBATCH --job-name=raxml        ### job name
+#SBATCH --output=hostname.out   ### file in which to store job stdout
+#SBATCH --error=hostname.err    ### file in which to store job stderr
+#SBATCH --partition=short       ### can be short long fat longfat
+#SBATCH --time=01-00:00:00      ### Run for 1 day
+#SBATCH --nodes=1               ### Run on a single node
+#SBATCH --ntasks-per-node=1     ### Run one job on the node
+#SBATCH --cpus-per-task=28      ### Use 28 cores to run job (should match threads below)
+
+# Clear loaded modules
+module unload all
+
+# Load only what we want
+module load racs-eb
+module load RAxML/8.2.11-intel-2017b-hybrid-avx2
+
+## 
+raxml -T 28 -s alignment.phy -n ml-tree -m PROTGAMMAJTT -t spec 
+
