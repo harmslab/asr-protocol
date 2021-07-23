@@ -57,11 +57,16 @@ Start an interactive session on a compute node by:
 qsub -I -A harmslab
 ```
 
-When the job starts, run the following code. It will ask various questions. Type "Y" or hit [Enter] as prompted. This will install miniconda, various scientific computing libraries, and the phylogenetics libaries `ete3` and `pastml`. 
+When the job starts, run the following code. It will ask various questions. Type "Y" or hit [Enter] as prompted. This will install miniconda.
 
 ```
 wget https://repo.anaconda.com/miniconda/Miniconda3-py39_4.9.2-Linux-x86_64.sh &&
-bash Miniconda3-py39_4.9.2-Linux-x86_64.sh &&
+bash Miniconda3-py39_4.9.2-Linux-x86_64.sh
+```
+
+After this completes, log out of talapas and re-log back in.  (This will finalize the installation of miniconda).  Once logged back in, run the following to install various scientific computing libraries, as well as the phylogenetics libaries `ete3` and `pastml`. 
+
+```
 conda install numpy scipy matplotlib pandas &&
 pip install pastml ete3
 ```
@@ -71,8 +76,8 @@ pip install pastml ete3
 SSH into the cluster. Then run the following three commands. This will update your $PATH so when you type a command it looks in the directory that has raxml installed. 
 
 ```
-cp .bashrc .bashrc.bak
-echo "export PATH=/projects/harmslab/shared/standard-RAxML/:$PATH" >> .bashrc
+cp .bashrc .bashrc.bak &&
+echo "export PATH=/projects/harmslab/shared/standard-RAxML/:$PATH" >> .bashrc &&
 source .bashrc
 ```
 

@@ -9,13 +9,14 @@
 #SBATCH --ntasks-per-node=1     ### Run one job on the node
 #SBATCH --cpus-per-task=28      ### Use 28 cores to run job (should match threads below)
 
-# Clear loaded modules
-module unload all
+# Find the best phylogenetic model
+./raxml.py model -a alignment.phy -o find-model -T 28
 
-# Load only what we want
-module load racs-eb
-module load RAxML/8.2.11-intel-2017b-hybrid-avx2
+# Consruct the ML tree
+./raxml.py ml -a alignment.phy -m `cat find-model/best-model.txt` -o ml-tree -T 28
 
-## 
-raxml -T 28 -s alignment.phy -n ml-tree -m PROTGAMMAJTT -t spec 
-
+# Construct ancestors on the ML tree. NOTE: we have to root the ML tree that comes
+# out of RAxML with --anc-root-tree.  If you are specifying an input tree that
+# you rooted yourself (say, a reconciled species/gene tree), drop the
+# --anc-root-tree flag.
+./raxml.py anc -a alignment.phy -m `cat find-model/best-model.txt` -t ml-tree/07_final-tree.newick --anc-root-tree -o ml-anc -T 28
