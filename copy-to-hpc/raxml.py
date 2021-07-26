@@ -16,7 +16,9 @@ RAXML_BINARY = "raxmlHPC-PTHREADS-SSE3"
 # -----------------------------------------------------------------------------
 
 import pastml.acr
+import ete3
 from ete3 import Tree
+
 
 import pandas as pd
 import numpy as np
@@ -255,7 +257,7 @@ def _run_raxml(algorithm=None,
                 err = f"seed {seed} could not be interpreted as an int\n"
                 raise ValueError(err)
 
-            cmd.extend(["-p"],seed)
+            cmd.extend(["-p",seed])
         else:
             err = "seed must be True/False, int, or string representation of int\n"
             raise ValueError(err)
@@ -311,6 +313,24 @@ def _generate_parsimony_tree(alignment_file,
                threads=threads,
                raxml_binary=raxml_binary,
                other_args=["-y"])
+
+def _get_sh_supports(alignment_file,
+                     tree_file,
+                     model,
+                     name="get-sh-supports",
+                     seed=True,
+                     threads=1,
+                     raxml_binary=RAXML_BINARY):
+
+    # Get SH supports for this tree
+    _run_raxml(algorithm="J",
+               alignment_file=alignment_file,
+               tree_file=tree_file,
+               model=model,
+               name=name,
+               seed=seed,
+               threads=threads,
+               raxml_binary=raxml_binary)
 
 def _fix_raxml_tree(raxml_tree,out_file):
     """
@@ -442,16 +462,21 @@ def _copy_root(unrooted_newick,
     # and then try right if that does not work.
     else:
 
+        root_successful = False
         try:
             root_anc = unrooted_tree.get_common_ancestor(*left_leaves)
             unrooted_tree.set_outgroup(root_anc)
+            root_successful = True
         except ete3.coretype.tree.TreeError:
             try:
                 root_anc = unrooted_tree.get_common_ancestor(*right_leaves)
                 unrooted_tree.set_outgroup(root_anc)
+                root_successful = True
             except ete3.coretype.tree.TreeError:
-                err = "could not root tree for asr!\n"
-                raise ValueError(err)
+                pass
+
+        if not root_successful:
+            unrooted_tree.set_outgroup(root_anc.get_children()[1])
 
     # Write out newly rooted tree
     unrooted_tree.write(outfile=output_newick)
@@ -689,32 +714,33 @@ def _plot_ancestor_data(df_anc,
     fig.savefig(f"{anc_name}.pdf",bbox_inches="tight")
 
 
-def _make_ancestor_summary_trees(tree_file_with_labels,
-                                 tree_file_with_supports,
-                                 avg_pp_dict):
+def _make_ancestor_summary_trees(avg_pp_dict,
+                                 tree_file_with_labels,
+                                 tree_file_with_bl,
+                                 tree_file_with_supports=None):
     """
     Make trees summarizng ASR results.
 
-    tree_file_with_labels: output from RAxML that has nodes labeled by their
-                           ancestor identity (rooted tree)
-    tree_file_with_supports: tree file with supports on nodes
     avg_pp_dict: dictionary mapping ancestor names to avg ancestor posterior
                  probability
+    tree_file_with_labels: output from RAxML that has nodes labeled by their
+                           ancestor identity (rooted tree)
+    tree_file_with_bl: tree file with branch lengths
+    tree_file_with_supports: tree file with supports (optional)
 
-    Creates four newick files:
+    Creates three or four newick files:
         ancestors_label.newick: tree where internal names are labeled with\
                                 ancestor names
         ancestors_pp.newick: tree where supports are avg pp for that ancestor
-        ancestors_support.newick: tree where supports are branch supports (SH)
-        ancestors_all.newick: tree where internal names are name|support|pp.
+        ancestors_support.newick: tree with supports
+        ancestors_all.newick: tree where internal names are name|pp OR name|pp|support
     """
 
     # Fix raxml supports and copy root to support tree
-    _fix_raxml_tree(tree_file_with_supports,
-                    f"{tree_file_with_supports}.anc-tmp")
-    _copy_root(f"{tree_file_with_supports}.anc-tmp",
+    base_file = f"{tree_file_with_bl}.rooted.anc-tmp"
+    _copy_root(tree_file_with_bl,
                tree_file_with_labels,
-               f"{tree_file_with_supports}.rooted.anc-tmp",
+               base_file,
                unrooted_tree_fmt=0,
                rooted_tree_fmt=1)
 
@@ -722,46 +748,56 @@ def _make_ancestor_summary_trees(tree_file_with_labels,
     t_labeled = Tree(tree_file_with_labels,format=1)
 
     # Create output trees
-    t_out_label = Tree(f"{tree_file_with_supports}.rooted.anc-tmp",format=0)
-    t_out_support = Tree(f"{tree_file_with_supports}.rooted.anc-tmp",format=0)
-    t_out_pp = Tree(f"{tree_file_with_supports}.rooted.anc-tmp",format=0)
-    t_out_all = Tree(f"{tree_file_with_supports}.rooted.anc-tmp",format=0)
+    t_out_label = Tree(base_file,format=0)
+    t_out_pp = Tree(base_file,format=0)
+    t_out_all = Tree(base_file,format=0)
 
     # Main iterator (over main labeled tree)
     input_label_iterator = t_labeled.traverse("preorder")
 
     # These sub iterators will get populated with final tree info
-    support_iterator = t_out_support.traverse("preorder")
-    pp_iterator = t_out_pp.traverse("preorder")
     label_iterator = t_out_label.traverse("preorder")
+    pp_iterator = t_out_pp.traverse("preorder")
     all_iterator = t_out_all.traverse("preorder")
+
+    if tree_file_with_supports is not None:
+        _copy_root(tree_file_with_supports,
+                   tree_file_with_labels,
+                   f"{tree_file_with_supports}.rooted.anc-tmp",
+                   unrooted_tree_fmt=0,
+                   rooted_tree_fmt=1)
+        t_out_supports = Tree(tree_file_with_bl,format=0)
+        support_iterator = t_out_supports.traverse("preorder")
 
     # Iterate over main iterator
     for input_label_node in input_label_iterator:
 
         # Update sub itorators
-        support_node = next(support_iterator)
         pp_node = next(pp_iterator)
         label_node = next(label_iterator)
         all_node = next(all_iterator)
 
+        if tree_file_with_supports is not None:
+            support_node = next(support_iterator)
+
         # See if this is a leaf and make sure the labeles
         is_label_leaf = input_label_node.is_leaf()
-        is_support_leaf = support_node.is_leaf()
+        is_pp_leaf = pp_node.is_leaf()
 
         # If at least one of the support or label nodes is a leaf...
-        if is_label_leaf or is_support_leaf:
+        if is_label_leaf or is_pp_leaf:
 
             # If both are not leaves, this is bad news
-            if not (is_label_leaf and is_support_leaf):
-                err = "Tree order mismatch\n"
+            if not (is_label_leaf and is_pp_leaf):
+                err = "Tree order mismatch (node type)\n"
                 raise ValueError(err)
             else:
 
                 # If the nodes are both leaves, make sure they have the
                 # same name.
-                if input_label_node.name != support_node.name:
-                    err = "Tree order mismatch\n"
+                if input_label_node.name != pp_node.name:
+                    err = "Tree order mismatch (node name)\n"
+                    err += f"{input_label_node.name} != {pp_node.name}\n"
                     raise ValueError(err)
 
             # If we get here, this is a leaf node. Continue the iteration.
@@ -777,31 +813,39 @@ def _make_ancestor_summary_trees(tree_file_with_labels,
         pp_node.support = avg_pp_dict[anc_name]
 
         combo = [f"{anc_name}",
-                 f"{support_node.support:.0f}",
                  f"{pp_node.support:.2f}"]
+
+        # If support specified
+        if tree_file_with_supports is not None:
+            combo.append(f"{support_node.support:.0f}")
+
         all_node.name = "|".join(combo)
+
 
 
     t_out_pp.write(outfile="ancestors_pp.newick",
                    format=2,format_root_node=True)
-    t_out_support.write(outfile="ancestors_support.newick",
-                        format=2,format_root_node=True)
     t_out_label.write(outfile="ancestors_label.newick",
                       format=3,format_root_node=True)
     t_out_all.write(outfile="ancestors_all.newick",
                     format=3,format_root_node=True)
 
+    if tree_file_with_supports is not None:
+        t_out_all.write(outfile="ancestors_support.newick",
+                        format=3,format_root_node=True)
+
     # Delete temporary files
-    to_remove = glob.glob(os.path.join("00_input","*.anc-tmp"))
-    for r in to_remove:
-        os.remove(r)
+    #to_remove = glob.glob(os.path.join("00_input","*.anc-tmp"))
+    #for r in to_remove:
+    #    os.remove(r)
 
 
 def _parse_raxml_anc_output(anc_prob_file,
                             alignment_file,
                             tree_file_with_labels,
-                            tree_file_with_supports,
-                            name,
+                            tree_file_with_bl,
+                            tree_file_with_supports=None,
+                            name="ancestors",
                             alt_cutoff=0.25,
                             plot_width_ratio=5):
     """
@@ -811,7 +855,8 @@ def _parse_raxml_anc_output(anc_prob_file,
     anc_prob_file: ancestor posterior probability file as written out by raxml
     alignment_file: phylip alignment used to create ancestors
     tree_file_with_labels: output newick tree file written by raxml
-    tree_file_with_supports: newick tree with SH or bootstrap supports
+    tree_file_with_bl: newick tree with branch lengths
+    tree_file_with_supports: newick tree with supports
     name: name for output directory
     alt_cutoff: cutoff (inclusive) for identifying plausible alternate states
     plot_width_ratio: ratio of main and histogram plot widths for ancestors
@@ -828,7 +873,9 @@ def _parse_raxml_anc_output(anc_prob_file,
     anc_prob_file = _copy_input_file(anc_prob_file,name)
     alignment_file = _copy_input_file(alignment_file,name)
     tree_file_with_labels = _copy_input_file(tree_file_with_labels,name)
-    tree_file_with_supports = _copy_input_file(tree_file_with_supports,name)
+    tree_file_with_bl = _copy_input_file(tree_file_with_bl,name)
+    if tree_file_with_supports is not None:
+        tree_file_with_supports = _copy_input_file(tree_file_with_supports,name)
 
     # Move into output directory
     os.chdir(name)
@@ -1027,9 +1074,10 @@ def _parse_raxml_anc_output(anc_prob_file,
     df.to_csv(f"ancestors.csv")
 
     # Create final tree
-    _make_ancestor_summary_trees(tree_file_with_labels,
-                                 tree_file_with_supports,
-                                 avg_pp_dict)
+    _make_ancestor_summary_trees(avg_pp_dict,
+                                 tree_file_with_labels,
+                                 tree_file_with_bl,
+                                 tree_file_with_supports)
 
     os.chdir("../")
 
@@ -1045,7 +1093,7 @@ def find_best_model(alignment_file,
                                     "LG","MTART","MTZOA","PMB","HIVB","HIVW",
                                     "JTTDCMUT","FLU","STMTREV","LG4M","LG4X",
                                     "GTR"],
-                    model_rates=["CAT","GAMMA"],
+                    model_rates=["GAMMA"],
                     model_freqs=["","F","X"],
                     output=None,
                     threads=1,
@@ -1236,15 +1284,15 @@ def generate_ml_tree(alignment_file,
     tree_file = "04_ml-tree.newick"
     shutil.copy("03_make-ml-tree/RAxML_result.03_make-ml-tree",tree_file)
 
+
     # Get SH supports for this tree
-    _run_raxml(algorithm="J",
-               alignment_file=alignment_file,
-               tree_file=tree_file,
-               model=model,
-               name="05_add-supports",
-               seed=True,
-               threads=threads,
-               raxml_binary=raxml_binary)
+    get_sh_supports(alignment_file=alignment_file,
+                    tree_file=tree_file,
+                    model=model,
+                    name="05_add-supports",
+                    seed=True,
+                    threads=threads,
+                    raxml_binary=raxml_binary)
 
     tree_file = "06_tree-with-supports.newick"
     shutil.copy("05_add-supports/RAxML_fastTreeSH_Support.05_add-supports",
@@ -1264,7 +1312,8 @@ def generate_ancestors(alignment_file,
                        threads=1,
                        raxml_binary=RAXML_BINARY,
                        root_tree=False,
-                       alt_cutoff=0.25):
+                       alt_cutoff=0.25,
+                       calculate_supports=False):
     """
     Generate ancestors and various summary outputs.
 
@@ -1334,17 +1383,17 @@ def generate_ancestors(alignment_file,
 
     tree_file_with_bl = "02_optimize-branch-lengths/RAxML_result.02_optimize-branch-lengths"
 
-    # Get SH supports for this tree
-    _run_raxml(algorithm="J",
-               alignment_file=alignment_file,
-               tree_file=tree_file_with_bl,
-               model=model,
-               name="03_add-supports",
-               seed=True,
-               threads=threads,
-               raxml_binary=raxml_binary)
-
-    tree_file_with_supports = "03_add-supports/RAxML_fastTreeSH_Support.03_add-supports"
+    if calculate_supports:
+        _get_sh_supports(alignment_file,
+                         tree_file_with_bl,
+                         model=model,
+                         name="03_get-sh-supports",
+                         seed=True,
+                         threads=threads,
+                         raxml_binary=raxml_binary)
+        tree_file_with_supports = "03_get-sh-supports/RAxML_fastTreeSH_Support.03_get-sh-supports"
+    else:
+        tree_file_with_supports = None
 
     # Copy root from rooted tree into tree with newly optimized branch lengths
     tree_file_for_asr = "04_tree-for-asr.newick"
@@ -1369,7 +1418,8 @@ def generate_ancestors(alignment_file,
     _parse_raxml_anc_output(anc_prob_file,
                             alignment_file,
                             tree_file_with_labels,
-                            tree_file_with_supports,
+                            tree_file_with_bl,
+                            tree_file_with_supports=tree_file_with_supports,
                             name="06_final-ancestors",
                             alt_cutoff=alt_cutoff)
 
@@ -1408,6 +1458,9 @@ def main(argv):
                         default=0.25)
     parser.add_argument("--anc-root-tree",
                         help="anc mode: should raxml root tree before ancestor reconstruction?",
+                        action='store_true')
+    parser.add_argument("--anc-get-supports",
+                        help="anc mode: should raxml get node supports before reconstruction?",
                         action='store_true')
 
     # Parse arguments
