@@ -1286,13 +1286,13 @@ def generate_ml_tree(alignment_file,
 
 
     # Get SH supports for this tree
-    get_sh_supports(alignment_file=alignment_file,
-                    tree_file=tree_file,
-                    model=model,
-                    name="05_add-supports",
-                    seed=True,
-                    threads=threads,
-                    raxml_binary=raxml_binary)
+    _get_sh_supports(alignment_file=alignment_file,
+                     tree_file=tree_file,
+                     model=model,
+                     name="05_add-supports",
+                     seed=True,
+                     threads=threads,
+                     raxml_binary=raxml_binary)
 
     tree_file = "06_tree-with-supports.newick"
     shutil.copy("05_add-supports/RAxML_fastTreeSH_Support.05_add-supports",
