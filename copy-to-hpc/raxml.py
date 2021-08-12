@@ -6,10 +6,8 @@ Wrap key features of raxml for asr work.
 __author__ = "Michael J. Harms (harmsm@gmail.com)"
 __date__ = "2021-07-22"
 
-# raxml binary to use it not specified on the command line.  Note: this software
-# uses the -T call to specify the number of threads.  This requires a PTHREADS
-# ramxml binary.
-RAXML_BINARY = "raxmlHPC-PTHREADS-SSE3"
+# raxml binary to use it not specified on the command line.
+RAXML_BINARY = "raxml-ng.dev"
 
 # -----------------------------------------------------------------------------
 # Module import
@@ -19,7 +17,6 @@ import pastml.acr
 import ete3
 from ete3 import Tree
 
-
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
@@ -27,7 +24,7 @@ import matplotlib.patches as patches
 from matplotlib import gridspec
 
 import subprocess, os, glob, re, sys, time, random, argparse, inspect, string
-import shutil
+import shutil, multiprocessing
 
 # -----------------------------------------------------------------------------
 # Configure plotting
@@ -49,37 +46,6 @@ plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 # Data
 # -----------------------------------------------------------------------------
 
-# List of AAs as ordered in RAxML output
-AA_LIST = ['ALA','ARG','ASN','ASP','CYS',
-           'GLN','GLU','GLY','HIS','ILE',
-           'LEU','LYS','MET','PHE','PRO',
-           'SER','THR','TRP','TYR','VAL']
-
-# Dictionary for converting three letter to single letter aa code
-THREE_TO_ONE = dict([('ALA','A'),
-                     ('CYS','C'),
-                     ('ASP','D'),
-                     ('GLU','E'),
-                     ('PHE','F'),
-                     ('GLY','G'),
-                     ('HIS','H'),
-                     ('HSE','H'),
-                     ('HSD','H'),
-                     ('ILE','I'),
-                     ('LYS','K'),
-                     ('LEU','L'),
-                     ('MET','M'),
-                     ('MSE','M'),
-                     ('ASN','N'),
-                     ('PRO','P'),
-                     ('GLN','Q'),
-                     ('ARG','R'),
-                     ('SER','S'),
-                     ('THR','T'),
-                     ('VAL','V'),
-                     ('TRP','W'),
-                     ('TYR','Y')])
-
 # lists of chemically similar amino acids. the same amino acid can occur
 # in different lists.
 CHEM_SIMILAR = [["A","C","N","Q","S","T"],
@@ -95,24 +61,35 @@ CHEM_SIMILAR = [["A","C","N","Q","S","T"],
 
 def _parse_raxml_info_for_aic(info_file):
     """
-    Open an info file from a tree generation run and get parameters important
-    for calculating an AIC value in model testing.
+    Open a log file from a tree evaluation run and get log likelihood,
+    number of fit parameters, and various AIC scores.
     """
 
     # Open the file and read lines
+    out = {}
     with open(info_file,'r') as f:
         for line in f:
 
             # Look for likelihood
-            if re.search("likelihood:",line):
-                L = float(line.strip().split()[-1])
+            if re.search("Final LogLikelihood:",line):
+                out["L"] = float(line.strip().split(":")[-1])
+                continue
 
             # Look for number of parameters
-            if re.search("AIC-TEST\(BR-LEN\)",line):
-                N = int(line.strip().split()[-1])
+            if re.search("Free parameters",line):
+                out["N"] = int(line.strip().split(":")[-1])
+                continue
+
+            if re.search("AIC score",line):
+                cols = line.split("/")
+                for c in cols:
+
+                    value = float(c.strip().split(":")[-1])
+                    key = c.strip().split(":")[0].split()[0].strip()
+                    out[key] = value
 
     # Return L, N, and AIC
-    return {"L":L,"N":N,"AIC":(2*N - 2*L)}
+    return out
 
 def _gen_seed():
     """
@@ -122,12 +99,11 @@ def _gen_seed():
 
     return "".join([f"{random.choice(range(10)):d}" for _ in range(10)])
 
-def _create_new_dir(dir_name=None,dir_base=RAXML_BINARY):
+def _create_new_dir(dir_name=None):
     """
     Create a new directory.
 
-    dir_name: if specified, name the directory this (ignoring dir_base)
-    dir_base: if dir_name is not specified, name the directory dir_base_random_bit
+    dir_name: if specified, name the directory this
 
     returns name of created directory
     """
@@ -136,6 +112,8 @@ def _create_new_dir(dir_name=None,dir_base=RAXML_BINARY):
     if dir_name is None:
         rand_name = "".join([random.choice(string.ascii_letters)
                               for _ in range(10)])
+        dir_base = os.path.split(RAXML_BINARY)[-1]
+
         dir_name = f"{dir_base}_{rand_name}"
 
     # If directory already exists, throw error
@@ -150,22 +128,27 @@ def _create_new_dir(dir_name=None,dir_base=RAXML_BINARY):
 
 def _copy_input_file(input_file,
                      dir_name,
+                     file_name=None,
                      make_input_dir=True):
     """
     copy an input file into a directory in a stereotyped way.
 
     If make_input_dir is specified, copy input_file into dir_name/00_input,
     creating 00_input if necessary.  If make_input_dir is not specified,
-    copy in the file as dir_name/input_{input_file}.
+    copy in the file as dir_name/{input_file}.
 
     input_file: file to copy in
     dir_name: copy into dir_name
+    file_name: what to call file in new directory. If none, use same name.
     make_input_dir: (bool) make input directory 00_input or not.
 
     returns name of copied file
     """
 
-    file_alone = os.path.split(input_file)[-1]
+
+    if file_name is None:
+        file_name = os.path.split(input_file)[-1]
+    file_alone = os.path.split(file_name)[-1]
 
     # If we are putting this into an input subdirectory
     if make_input_dir:
@@ -175,9 +158,9 @@ def _copy_input_file(input_file,
         file_alone = os.path.join("00_input",file_alone)
 
     # If we are not making an input directory, append input_ to front
-    else:
-        if not file_alone.startswith("input"):
-            file_alone = f"input_{file_alone}"
+    #else:
+    #    if not file_alone.startswith("input"):
+    #        file_alone = f"input_{file_alone}"
 
     shutil.copy(input_file,os.path.join(dir_name,file_alone))
 
@@ -187,7 +170,7 @@ def _run_raxml(algorithm=None,
                alignment_file=None,
                tree_file=None,
                model=None,
-               name=None,
+               dir_name=None,
                seed=None,
                threads=1,
                raxml_binary=RAXML_BINARY,
@@ -196,59 +179,58 @@ def _run_raxml(algorithm=None,
     Run raxml. Creates a working directory, copies in the relevant files, runs
     there, and then returns to the previous directory.
 
-    algorithm: letter passed to the -f flag
-    alignment_file: alignment file in .phy format
-    tree_file: tree file in .newick format
-    model: model in format recognized by -m
-    name: name to pass via -n. If specified, this will also be the name of the
-          working directory.
+    algorithm: algorithm to run (--all, --ancestral, etc.)
+    alignment_file: alignment file in .phy format (passed via --msa)
+    tree_file: tree file in .newick format (passed via --tree)
+    model: model in format recognized by --model
+    dir_name: If specified, this will be the name of the working directory.
     seed: true/false, int, or str. If true, pass a randomly generated seed to
-          raxml. If int or str, use that as the seed.
-    threads: number of threads to use
+          raxml. If int or str, use that as the seed. (passed via --seed)
+    threads: number of threads to use (passed via --threads)
     raxml_binary: raxml binary to use
     other_args: list of arguments to pass to raxml
     """
 
-    # Create directory in which to do calculation]
-    dir_name = _create_new_dir(dir_name=name,dir_base=raxml_binary)
+    # Create directory in which to do calculation
+    dir_name = _create_new_dir(dir_name=dir_name)
 
     # Copy alignment and tree files into the directory (if specified)
     if alignment_file is not None:
         alignment_file = _copy_input_file(alignment_file,
                                           dir_name,
-                                          make_input_dir=True)
+                                          file_name="alignment",
+                                          make_input_dir=False)
     if tree_file is not None:
         tree_file = _copy_input_file(tree_file,
                                      dir_name,
-                                     make_input_dir=True)
+                                     file_name="tree",
+                                     make_input_dir=False)
 
     # Go into working directory
+    cwd = os.getcwd()
     os.chdir(dir_name)
 
     # Build a command list
     cmd = [raxml_binary]
 
     if algorithm is not None:
-        cmd.extend(["-f",algorithm])
+        cmd.append(algorithm)
 
     if alignment_file is not None:
-        cmd.extend(["-s",alignment_file])
+        cmd.extend(["--msa",alignment_file])
 
     if tree_file is not None:
-        cmd.extend(["-t",tree_file])
+        cmd.extend(["--tree",tree_file])
 
     if model is not None:
-        cmd.extend(["-m",model])
-
-    if name is not None:
-        cmd.extend(["-n",name])
+        cmd.extend(["--model",model])
 
     # seed argument is overloaded. Interpret based on type
     if seed is not None:
         if type(seed) is bool:
-            cmd.extend(["-p",_gen_seed()])
+            cmd.extend(["--seed",_gen_seed()])
         elif type(seed) is int:
-            cmd.extend(["-p",f"{seed:d}"])
+            cmd.extend(["--seed",f"{seed:d}"])
         elif type(seed) is str:
 
             try:
@@ -257,12 +239,12 @@ def _run_raxml(algorithm=None,
                 err = f"seed {seed} could not be interpreted as an int\n"
                 raise ValueError(err)
 
-            cmd.extend(["-p",seed])
+            cmd.extend(["--seed",seed])
         else:
             err = "seed must be True/False, int, or string representation of int\n"
             raise ValueError(err)
 
-    cmd.extend(["-T",f"{threads:d}"])
+    cmd.extend(["--threads",f"{threads:d}"])
 
     # Put on any custom args
     for a in other_args:
@@ -287,54 +269,38 @@ def _run_raxml(algorithm=None,
         raise RuntimeError(err)
 
     # Leave working directory
-    os.chdir("../")
+    os.chdir(cwd)
 
 # -----------------------------------------------------------------------------
 # Tree operations
 # -----------------------------------------------------------------------------
 
 def _generate_parsimony_tree(alignment_file,
-                             name="parsimony-tree",
+                             dir_name="parsimony-tree",
                              threads=1,
                              raxml_binary=RAXML_BINARY):
     """
     Generate a parsimony tree from an alignment.
 
     alignment_file: alignment file in .phy format
-    name: name to give directory and pass via -n to raxml.
+    dir_name: name to give directory
     threads: number of threads to use
     raxml_binary: raxml binary to use
     """
 
-    _run_raxml(alignment_file=alignment_file,
-               name=name,
+    _run_raxml(algorithm="--start",
+               alignment_file=alignment_file,
+               dir_name=dir_name,
                seed=True,
-               model="PROTGAMMAJTT",
+               model="LG",
                threads=threads,
                raxml_binary=raxml_binary,
-               other_args=["-y"])
+               other_args=["--tree","pars{1}"])
 
-def _get_sh_supports(alignment_file,
-                     tree_file,
-                     model,
-                     name="get-sh-supports",
-                     seed=True,
-                     threads=1,
-                     raxml_binary=RAXML_BINARY):
-
-    # Get SH supports for this tree
-    _run_raxml(algorithm="J",
-               alignment_file=alignment_file,
-               tree_file=tree_file,
-               model=model,
-               name=name,
-               seed=seed,
-               threads=threads,
-               raxml_binary=raxml_binary)
 
 def _fix_raxml_tree(raxml_tree,out_file):
     """
-    Clean up an raxml newick tree so it is readable by other software.
+    Clean up an raxml [support] newick tree so it is readable by other software.
 
     raxml_tree: newick file dumped by raxml
     out_file: name of file to write out. (does not check for existance; will
@@ -433,23 +399,18 @@ def _copy_root(unrooted_newick,
             root_node = node
             continue
 
-        # Second iteration gets ancestor of all left. If this is a leaf,
-        # there is a single left outgroup.
+        # Second iteration gets ancestor of all left. Get leaves.
         if left_anc_node is None:
             left_anc_node = node
-            if left_anc_node.is_leaf():
-                left_leaves.append(left_anc_node.name)
+            left_leaves = [l.name for l in left_anc_node.get_leaves()]
             continue
 
-        # Look for ancestor of all left
-        if left_anc_node in node.get_ancestors():
-            if node.is_leaf():
-                left_leaves.append(node.name)
-
-        # Or all right
-        else:
-            if node.is_leaf():
-                right_leaves.append(node.name)
+        # First node without left_anc_node as a descendant is the
+        # right ancestor. Get leaves.
+        if left_anc_node not in node.get_ancestors():
+            right_anc_node = node
+            right_leaves = right_anc_node.get_leaves()
+            break
 
     # If we have single outgroups on the left or right, root on that
     if len(left_leaves) == 1:
@@ -716,7 +677,6 @@ def _plot_ancestor_data(df_anc,
 
 def _make_ancestor_summary_trees(avg_pp_dict,
                                  tree_file_with_labels,
-                                 tree_file_with_bl,
                                  tree_file_with_supports=None):
     """
     Make trees summarizng ASR results.
@@ -724,33 +684,32 @@ def _make_ancestor_summary_trees(avg_pp_dict,
     avg_pp_dict: dictionary mapping ancestor names to avg ancestor posterior
                  probability
     tree_file_with_labels: output from RAxML that has nodes labeled by their
-                           ancestor identity (rooted tree)
-    tree_file_with_bl: tree file with branch lengths
+                           ancestor identity. Should also have branche lengths.
     tree_file_with_supports: tree file with supports (optional)
 
     Creates three or four newick files:
         ancestors_label.newick: tree where internal names are labeled with\
                                 ancestor names
         ancestors_pp.newick: tree where supports are avg pp for that ancestor
-        ancestors_support.newick: tree with supports
+        ancestors_support.newick: tree with supports (optional)
         ancestors_all.newick: tree where internal names are name|pp OR name|pp|support
     """
 
     # Fix raxml supports and copy root to support tree
-    base_file = f"{tree_file_with_bl}.rooted.anc-tmp"
-    _copy_root(tree_file_with_bl,
-               tree_file_with_labels,
-               base_file,
-               unrooted_tree_fmt=0,
-               rooted_tree_fmt=1)
+    #base_file = f"{tree_file_with_bl}.rooted.anc-tmp"
+    #_copy_root(tree_file_with_bl,
+    #           tree_file_with_labels,
+    #           base_file,
+    #           unrooted_tree_fmt=0,
+    #           rooted_tree_fmt=1)
 
     # Create label trees
     t_labeled = Tree(tree_file_with_labels,format=1)
 
     # Create output trees
-    t_out_label = Tree(base_file,format=0)
-    t_out_pp = Tree(base_file,format=0)
-    t_out_all = Tree(base_file,format=0)
+    t_out_label = Tree(tree_file_with_labels,format=1)
+    t_out_pp = Tree(tree_file_with_labels,format=1)
+    t_out_all = Tree(tree_file_with_labels,format=1)
 
     # Main iterator (over main labeled tree)
     input_label_iterator = t_labeled.traverse("preorder")
@@ -761,12 +720,12 @@ def _make_ancestor_summary_trees(avg_pp_dict,
     all_iterator = t_out_all.traverse("preorder")
 
     if tree_file_with_supports is not None:
-        _copy_root(tree_file_with_supports,
-                   tree_file_with_labels,
-                   f"{tree_file_with_supports}.rooted.anc-tmp",
-                   unrooted_tree_fmt=0,
-                   rooted_tree_fmt=1)
-        t_out_supports = Tree(tree_file_with_bl,format=0)
+        #_copy_root(tree_file_with_supports,
+        #           tree_file_with_labels,
+        #           f"{tree_file_with_supports}.rooted.anc-tmp",
+        #           unrooted_tree_fmt=0,
+        #           rooted_tree_fmt=1)
+        t_out_supports = Tree(tree_file_with_labels,format=0)
         support_iterator = t_out_supports.traverse("preorder")
 
     # Iterate over main iterator
@@ -835,17 +794,16 @@ def _make_ancestor_summary_trees(avg_pp_dict,
                         format=3,format_root_node=True)
 
     # Delete temporary files
-    #to_remove = glob.glob(os.path.join("00_input","*.anc-tmp"))
-    #for r in to_remove:
-    #    os.remove(r)
+    to_remove = glob.glob(os.path.join("00_input","*.anc-tmp"))
+    for r in to_remove:
+        os.remove(r)
 
 
 def _parse_raxml_anc_output(anc_prob_file,
                             alignment_file,
                             tree_file_with_labels,
-                            tree_file_with_bl,
                             tree_file_with_supports=None,
-                            name="ancestors",
+                            dir_name="ancestors",
                             alt_cutoff=0.25,
                             plot_width_ratio=5):
     """
@@ -855,8 +813,7 @@ def _parse_raxml_anc_output(anc_prob_file,
     anc_prob_file: ancestor posterior probability file as written out by raxml
     alignment_file: phylip alignment used to create ancestors
     tree_file_with_labels: output newick tree file written by raxml
-    tree_file_with_bl: newick tree with branch lengths
-    tree_file_with_supports: newick tree with supports
+    tree_file_with_supports: newick tree with supports (optional)
     name: name for output directory
     alt_cutoff: cutoff (inclusive) for identifying plausible alternate states
     plot_width_ratio: ratio of main and histogram plot widths for ancestors
@@ -869,16 +826,18 @@ def _parse_raxml_anc_output(anc_prob_file,
     """
 
     # Make directory and copy in files
-    os.mkdir(name)
-    anc_prob_file = _copy_input_file(anc_prob_file,name)
-    alignment_file = _copy_input_file(alignment_file,name)
-    tree_file_with_labels = _copy_input_file(tree_file_with_labels,name)
-    tree_file_with_bl = _copy_input_file(tree_file_with_bl,name)
+    dir_name = _create_new_dir(dir_name)
+
+    anc_prob_file = _copy_input_file(anc_prob_file,dir_name)
+    alignment_file = _copy_input_file(alignment_file,dir_name)
+    tree_file_with_labels = _copy_input_file(tree_file_with_labels,dir_name)
     if tree_file_with_supports is not None:
-        tree_file_with_supports = _copy_input_file(tree_file_with_supports,name)
+        tree_file_with_supports = _copy_input_file(tree_file_with_supports,
+                                                   dir_name)
 
     # Move into output directory
-    os.chdir(name)
+    cwd = os.getcwd()
+    os.chdir(dir_name)
 
     # Get gaps, reconstructed by parsimony
     gap_anc_dict = _get_ancestral_gaps(alignment_file,
@@ -889,22 +848,34 @@ def _parse_raxml_anc_output(anc_prob_file,
     anc_list = []
     anc_all_pp = []
     last_line = ""
+    first_line = True
     with open(anc_prob_file) as f:
         for l in f:
             line = l.strip()
 
-            # New ancestor if last line was blank
-            if last_line == "":
-                anc_list.append(line)
+            if first_line:
+                tmp_column_names = line.split()
+                column_names = []
+                for c in tmp_column_names:
+                    column_names.append(re.sub("p_","",c))
+
+                aa_list = column_names[3:]
+
+                first_line = False
+                continue
+
+            col = line.split()
+
+            if len(anc_list) == 0:
+                anc_list.append(col[0])
                 anc_all_pp.append([])
-            else:
 
-                # If not a blank line, parse ancestor posterior probabilities
-                if line != "":
-                    pp = np.array([float(c) for c in line.split()])
-                    anc_all_pp[-1].append(pp)
+            if col[0] != anc_list[-1]:
+                anc_list.append(col[0])
+                anc_all_pp.append([])
 
-            last_line = line
+            anc_all_pp[-1].append(np.array([float(c) for c in col[3:]]))
+
 
     # Create data structures for output
     out = []
@@ -949,14 +920,14 @@ def _parse_raxml_anc_output(anc_prob_file,
 
             # Get ml posterior probability and sequence
             anc_ml_pp.append(np.max(pp))
-            anc_ml_seq.append(THREE_TO_ONE[AA_LIST[np.argmax(pp)]])
+            anc_ml_seq.append(aa_list[np.argmax(pp)])
 
             # Set max to zero to get next best
             pp[np.argmax(pp)] = 0.0
 
             # Get second best posterior probability and sequence
             anc_alt_pp.append(np.max(pp))
-            anc_alt_seq.append(THREE_TO_ONE[AA_LIST[np.argmax(pp)]])
+            anc_alt_seq.append(aa_list[np.argmax(pp)])
 
             # Add gap!
             if gap_anc_dict[anc][j] == True:
@@ -1076,10 +1047,9 @@ def _parse_raxml_anc_output(anc_prob_file,
     # Create final tree
     _make_ancestor_summary_trees(avg_pp_dict,
                                  tree_file_with_labels,
-                                 tree_file_with_bl,
                                  tree_file_with_supports)
 
-    os.chdir("../")
+    os.chdir(cwd)
 
 
 # -----------------------------------------------------------------------------
@@ -1088,13 +1058,14 @@ def _parse_raxml_anc_output(anc_prob_file,
 
 def find_best_model(alignment_file,
                     tree_file=None,
-                    model_matrices=["DAYHOFF","DCMUT","JTT","MTREV","WAG",
-                                    "RTREV","CPREV","VT","BLOSUM62","MTMAM",
-                                    "LG","MTART","MTZOA","PMB","HIVB","HIVW",
-                                    "JTTDCMUT","FLU","STMTREV","LG4M","LG4X",
-                                    "GTR"],
-                    model_rates=["GAMMA"],
-                    model_freqs=["","F","X"],
+                    model_matrices=["Blosum62","cpREV","Dayhoff","DCMut","DEN",
+                                    "FLU","HIVb","HIVw","JTT","JTT-DCMut","LG",
+                                    "mtART","mtMAM","mtREV","mtZOA","PMB",
+                                    "rtREV","stmtREV","VT","WAG","LG4M","LG4X",
+                                    "PROTGTR"],
+                    model_rates=["","G8"],
+                    model_freqs=["","FC","FO"],
+                    model_invariant=["","IO","IC"],
                     output=None,
                     threads=1,
                     raxml_binary=RAXML_BINARY):
@@ -1113,99 +1084,104 @@ def find_best_model(alignment_file,
     raxml_binary: raxml binary to use
     """
 
-    # Models that might concievably, but do not actually, exist
-    NOT_ALLOWED_MODELS = ["PROTCATGTRF","PROTGAMMAGTRF"]
-
     # Make sure alignment file exists
     if not os.path.exists(alignment_file):
         err = f"alignment file {alignment_file} does not exist\n"
         raise ValueError(err)
 
     # Create output directory
-    output = _create_new_dir(dir_name=output,dir_base="find_best_model")
+    if output is None:
+        rand = "".join([random.choice(string.ascii_letters) for _ in range(10)])
+        output = f"find_best_model_{rand}"
+
+    dir_name = _create_new_dir(dir_name=output)
 
     # Copy files into input directory
     alignment_file = _copy_input_file(alignment_file,
-                                      output,
+                                      dir_name,
                                       make_input_dir=True)
     if tree_file is not None:
         tree_file = _copy_input_file(tree_file,
-                                     output,
+                                     dir_name,
                                      make_input_dir=True)
 
     # Move into the output directory
-    os.chdir(output)
+    cwd = os.getcwd()
+    os.chdir(dir_name)
 
     # Generate a parsimony tree if not was specified
     if tree_file is None:
-        _generate_parsimony_tree(alignment_file,name="01_make-parsimony-tree",
-                                 threads=threads,raxml_binary=raxml_binary)
+        _generate_parsimony_tree(alignment_file,
+                                 dir_name="01_make-parsimony-tree",
+                                 threads=threads,
+                                 raxml_binary=raxml_binary)
         tree_file = "02_parsimony-tree.newick"
         shutil.copy(os.path.join("01_make-parsimony-tree",
-                                 "RAxML_parsimonyTree.01_make-parsimony-tree"),
+                                 "alignment.raxml.startTree"),
                     tree_file)
 
     # Dictionary to hold stats for each model
-    out = {"model":[],
-           "L":[],
-           "N":[],
-           "AIC":[]}
+    out = {"model":[]}
 
     seed = _gen_seed()
 
+    # All possible models, dropping rate, freq, invariant for LG4M and LG4X.
+    num_models = (len(model_matrices)-2)*len(model_rates)*len(model_freqs)*len(model_invariant) + 2
+
     # Go over all combos of the requested matrices, rates, and freqs.
+    model_counter = 1
     for matrix in model_matrices:
         for rate in model_rates:
             for freq in model_freqs:
+                for invariant in model_invariant:
 
-                # Check for incompatible matrix/freq/rate combos
-                if matrix in ["LG4M","LG4X"]:
-                    if freq != "":
-                        continue
-                    if rate == "CAT":
-                        continue
+                    # Check for incompatible matrix/freq/rate combos
+                    if matrix in ["LG4M","LG4X"]:
+                        if rate != "" or freq != "" or invariant != "":
+                            continue
 
-                # Construct model string
-                model = f"PROT{rate}{matrix}{freq}"
+                    # Build model string (for example: LG+G8+FC+IO)
+                    model = [matrix,rate,freq,invariant]
+                    model = [m for m in model if m != ""]
+                    model = "+".join(model)
 
-                # Skip models that are not actually implemented in raxml
-                if model in NOT_ALLOWED_MODELS:
-                    continue
+                    # Print model number we're trying
+                    print(f"{model} ({model_counter}/{num_models})")
+                    model_counter += 1
 
-                # Optimize branch lengths etc. on the existing tree
-                _run_raxml(algorithm="e",
-                           alignment_file=alignment_file,
-                           tree_file=tree_file,
-                           model=model,
-                           seed=seed,
-                           name="tmp",
-                           threads=threads,
-                           raxml_binary=raxml_binary)
+                    # Optimize branch lengths etc. on the existing tree
+                    _run_raxml(algorithm="--evaluate",
+                               alignment_file=alignment_file,
+                               tree_file=tree_file,
+                               model=model,
+                               seed=seed,
+                               dir_name="tmp",
+                               threads=threads,
+                               raxml_binary=raxml_binary)
 
-                # Grab the info file from this run
-                os.chdir("tmp")
-                info_out = None
-                info_files = glob.glob("*_info*")
-                if len(info_files) != 1:
-                    err = "could not find info file in output"
-                    raise RuntimeError(err)
-                info_out = info_files[0]
+                    # Grab the info file from this run
+                    os.chdir("tmp")
 
-                # Get results from the info file
-                result = _parse_raxml_info_for_aic(info_out)
-                out["model"].append(model)
-                out["L"].append(result["L"])
-                out["N"].append(result["N"])
-                out["AIC"].append(result["AIC"])
+                    # Get results from the info file
+                    result = _parse_raxml_info_for_aic("alignment.raxml.log")
+                    out["model"].append(model)
+                    for r in result:
+                        try:
+                            out[r].append(result[r])
+                        except KeyError:
+                            out[r] = [result[r]]
 
-                # Get out of temporary directory and nuke
-                os.chdir("..")
-                shutil.rmtree("tmp")
+                    # Get out of temporary directory and nuke
+                    os.chdir("..")
+                    shutil.rmtree("tmp")
 
-    # Create a csv file sorted best to worst aic
+    # Create a csv file sorted best to worst aicc
     df = pd.DataFrame(out)
-    min_aic = np.min(df.AIC)
-    df["p"] = np.exp((min_aic - df.AIC)/2)
+
+    print(df)
+
+    min_aic = np.min(df.AICc)
+    df["p"] = np.exp((min_aic - df.AICc)/2)
     indexer = np.argsort(df.p)[::-1]
     df = df.iloc[indexer,:]
     df.to_csv("model-comparison.csv")
@@ -1219,29 +1195,30 @@ def find_best_model(alignment_file,
     f.close()
 
     # Print best model to stdout
-    print(f"\n\nBest model: {best_model}\nAIC Prob:{df.p.iloc[0]}\n\n")
+    print(f"\n\nBest model: {best_model}\nAICc Prob:{df.p.iloc[0]}\n\n")
 
     # Leave the output directory
-    os.chdir("../")
+    os.chdir(cwd)
 
 def generate_ml_tree(alignment_file,
                      model,
                      tree_file=None,
                      output=None,
                      threads=1,
-                     raxml_binary=RAXML_BINARY):
+                     raxml_binary=RAXML_BINARY,
+                     write_bs_msa=True):
     """
     Generate maximum likelihood tree with SH supports from an alignment given
     a substitution model.
 
     alignment_file: alignment in .phy format
-    model: model (e.g. PROTGAMMAJTTF).  spit out in best-model.txt from
-           "find_best_model" function/mode
+    model: model (e.g. LG+G8).
     tree_file: tree_file in newick format. If not specified, a parsimony tree
                will be generated. used as starting point.
-    output: name out output directory.
+    output: name of output directory.
     threads: number of threads to use
     raxml_binary: what raxml binary to use
+    write_bs_msa: whether or not to write out all bootstrap alignments
     """
 
     # Make sure alignment file exists
@@ -1250,59 +1227,44 @@ def generate_ml_tree(alignment_file,
         raise ValueError(err)
 
     # Create output directory
-    output = _create_new_dir(dir_name=output,dir_base="ml_tree")
+    if output is None:
+        rand = "".join([random.choice(string.ascii_letters) for _ in range(10)])
+        output = f"generate_ml_tree_{rand}"
+
+    dir_name = _create_new_dir(dir_name=output)
 
     # Copy files into input directory
     alignment_file = _copy_input_file(alignment_file,
-                                      output,
+                                      dir_name,
                                       make_input_dir=True)
     if tree_file is not None:
         tree_file = _copy_input_file(tree_file,
-                                     output,
+                                     dir_name,
                                      make_input_dir=True)
     # Move into directory
-    os.chdir(output)
+    cwd = os.getcwd()
+    os.chdir(dir_name)
 
-    # Generate a parsimony tree if not was specified
-    if tree_file is None:
-        _generate_parsimony_tree(alignment_file,
-                                 name="01_make-parsimony-tree",
-                                 threads=threads,
-                                 raxml_binary=raxml_binary)
-        tree_file = "02_parsimony-tree.newick"
-        shutil.copy("01_make-parsimony-tree/RAxML_parsimonyTree.01_make-parsimony-tree",
-                    tree_file)
+
+    other_args = ["--bs-trees","autoMRE"]
+    if write_bs_msa:
+        other_args.append("--bs-write-msa")
 
     # Run raxml to create tree
-    _run_raxml(alignment_file=alignment_file,
+    _run_raxml(algorithm="--all",
+               alignment_file=alignment_file,
                tree_file=tree_file,
                model=model,
-               name="03_make-ml-tree",
+               dir_name="01_make-ml-tree",
                seed=True,
                threads=threads,
-               raxml_binary=raxml_binary)
-    tree_file = "04_ml-tree.newick"
-    shutil.copy("03_make-ml-tree/RAxML_result.03_make-ml-tree",tree_file)
-
-
-    # Get SH supports for this tree
-    _get_sh_supports(alignment_file=alignment_file,
-                     tree_file=tree_file,
-                     model=model,
-                     name="05_add-supports",
-                     seed=True,
-                     threads=threads,
-                     raxml_binary=raxml_binary)
-
-    tree_file = "06_tree-with-supports.newick"
-    shutil.copy("05_add-supports/RAxML_fastTreeSH_Support.05_add-supports",
-                tree_file)
-
-    # Clean up supports and make them figtree readable.
-    _fix_raxml_tree(tree_file,"07_final-tree.newick")
+               raxml_binary=raxml_binary,
+               other_args=other_args)
+    tree_file = "02_ml-tree.newick"
+    shutil.copy("01_make-ml-tree/alignment.raxml.support",tree_file)
 
     # Leave working directory
-    os.chdir("../")
+    os.chdir(cwd)
 
 
 def generate_ancestors(alignment_file,
@@ -1311,21 +1273,17 @@ def generate_ancestors(alignment_file,
                        output=None,
                        threads=1,
                        raxml_binary=RAXML_BINARY,
-                       root_tree=False,
                        alt_cutoff=0.25,
                        calculate_supports=False):
     """
     Generate ancestors and various summary outputs.
 
     alignment_file: alignment file (phy)
-    model: model (e.g. PROTGAMMAJTTF).  spit out in best-model.txt from
-           "find_best_model" function/mode
-    tree_file: tree file to use for reconstruction. if root_tree is False,
-               this tree must be rooted.
+    model: model (e.g. LG+G8).
+    tree_file: tree file to use for reconstruction.
     output: name out output directory.
     threads: number of threads to use
     raxml_binary: what raxml binary to use
-    root_tree: (bool) whether or not to root the tree (midpoint rooting)
     alt_cutoff: cutoff to use for altAll
 
     creates fasta file and csv file with ancestral sequences, set of ancestor
@@ -1343,88 +1301,59 @@ def generate_ancestors(alignment_file,
         raise ValueError(err)
 
     # Create output directory
-    output = _create_new_dir(dir_name=output,dir_base="marginal_anc")
+    if output is None:
+        rand = "".join([random.choice(string.ascii_letters) for _ in range(10)])
+        output = f"generate_ancestors_{rand}"
 
-    # Copy files into input directory
+    dir_name = _create_new_dir(dir_name=output)
+
+    # Copy files into input directory. This will put them in 00_input and keep
+    # their original filenames so we have some notion of where they came from.
     alignment_file = _copy_input_file(alignment_file,
-                                      output,
+                                      dir_name,
                                       make_input_dir=True)
     tree_file = _copy_input_file(tree_file,
-                                 output,
+                                 dir_name,
                                  make_input_dir=True)
 
     # Move into working directory
-    os.chdir(output)
-
-    # If tree rooting is requested, root it
-    if root_tree:
-        _run_raxml(algorithm="I",
-                   alignment_file=alignment_file,
-                   tree_file=tree_file,
-                   model=model,
-                   name="01_root-tree",
-                   seed=True,
-                   threads=threads,
-                   raxml_binary=raxml_binary)
-        tree_file = "01_root-tree/RAxML_rootedTree.01_root-tree"
-
-    # Record this file name as one with roots.
-    tree_file_with_root = tree_file
+    cwd = os.getcwd()
+    os.chdir(dir_name)
 
     # Optimize branch lengths for this tree
-    _run_raxml(algorithm="e",
+    _run_raxml(algorithm="--evaluate",
                alignment_file=alignment_file,
                tree_file=tree_file,
                model=model,
-               name="02_optimize-branch-lengths",
+               dir_name="01_optimize-branch-lengths",
                seed=True,
                threads=threads,
                raxml_binary=raxml_binary)
 
-    tree_file_with_bl = "02_optimize-branch-lengths/RAxML_result.02_optimize-branch-lengths"
-
-    if calculate_supports:
-        _get_sh_supports(alignment_file,
-                         tree_file_with_bl,
-                         model=model,
-                         name="03_get-sh-supports",
-                         seed=True,
-                         threads=threads,
-                         raxml_binary=raxml_binary)
-        tree_file_with_supports = "03_get-sh-supports/RAxML_fastTreeSH_Support.03_get-sh-supports"
-    else:
-        tree_file_with_supports = None
-
-    # Copy root from rooted tree into tree with newly optimized branch lengths
-    tree_file_for_asr = "04_tree-for-asr.newick"
-    _copy_root(tree_file_with_bl,
-               tree_file_with_root,
-               tree_file_for_asr)
+    tree_file_with_bl = "01_optimize-branch-lengths/alignment.raxml.bestTree"
 
     # Do marginal reconstruction on the tree
-    _run_raxml(algorithm="A",
+    _run_raxml(algorithm="--ancestral",
                alignment_file=alignment_file,
-               tree_file=tree_file_for_asr,
+               tree_file=tree_file_with_bl,
                model=model,
                seed=True,
-               name="05_calc-marginal-anc",
+               dir_name="02_calc-marginal-anc",
                threads=threads,
                raxml_binary=raxml_binary)
 
-    anc_prob_file = "05_calc-marginal-anc/RAxML_marginalAncestralProbabilities.05_calc-marginal-anc"
-    tree_file_with_labels = "05_calc-marginal-anc/RAxML_nodeLabelledRootedTree.05_calc-marginal-anc"
+    anc_prob_file = "02_calc-marginal-anc/alignment.raxml.ancestralProbs"
+    tree_file_with_labels = "02_calc-marginal-anc/alignment.raxml.ancestralTree"
 
     # Parse output and make something human-readable
     _parse_raxml_anc_output(anc_prob_file,
                             alignment_file,
                             tree_file_with_labels,
-                            tree_file_with_bl,
-                            tree_file_with_supports=tree_file_with_supports,
-                            name="06_final-ancestors",
+                            dir_name="03_final-ancestors",
                             alt_cutoff=alt_cutoff)
 
     # Leave working directory
-    os.chdir("../")
+    os.chdir(cwd)
 
 # -----------------------------------------------------------------------------
 # Main function
@@ -1446,8 +1375,8 @@ def main(argv):
     parser.add_argument("-t","--tree",nargs=1,help="tree file (newick)")
     parser.add_argument("-m","--model",nargs=1,help="phylogenetic model")
     parser.add_argument("-o","--output",nargs=1,help="name for outputs")
-    parser.add_argument("-T","--threads",nargs=1,help="number of threads",type=int,
-                        default=1)
+    parser.add_argument("-T","--threads",nargs=1,help="number of threads. if -1 use all available.",type=int,
+                        default=-1)
     parser.add_argument("-b","--binary",nargs=1,help="raxml binary",
                         default=RAXML_BINARY)
 
@@ -1456,9 +1385,6 @@ def main(argv):
                         help="anc mode: alternate ancestor posterior probability cutoff",
                         type=float,
                         default=0.25)
-    parser.add_argument("--anc-root-tree",
-                        help="anc mode: should raxml root tree before ancestor reconstruction?",
-                        action='store_true')
     parser.add_argument("--anc-get-supports",
                         help="anc mode: should raxml get node supports before reconstruction?",
                         action='store_true')
@@ -1513,6 +1439,9 @@ def main(argv):
         else:
             kwargs["threads"] = threads[0]
 
+        if kwargs["threads"] == -1:
+            kwargs["threads"] = multiprocessing.cpu_count()
+
     # raxml binarys
     binary = args.binary
     if binary is None:
@@ -1522,7 +1451,6 @@ def main(argv):
     # Ancestor-specific arguments
     if mode == "anc":
         kwargs["alt_cutoff"] = args.anc_alt_pp
-        kwargs["root_tree"] = args.anc_root_tree
 
     # Figure out what kwargs are required and allowed for the function being
     # called
