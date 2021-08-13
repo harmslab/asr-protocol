@@ -9,14 +9,16 @@
 #SBATCH --ntasks-per-node=1     ### Run one job on the node
 #SBATCH --cpus-per-task=28      ### Use 28 cores to run job (should match threads below)
 
+module load gcc
+
 # Find the best phylogenetic model
-./raxml.py model -a alignment.phy -o find-model -T 28
+#run-raxml model -a alignment.phy -o find-model -T 28
 
 # Consruct the ML tree
-./raxml.py ml -a alignment.phy -m `cat find-model/best-model.txt` -o ml-tree -T 28
+#run-raxml ml -a alignment.phy -m `cat find-model/best-model.txt` -o ml-tree -T 28
 
-# Construct ancestors on the ML tree. NOTE: we have to root the ML tree that comes
-# out of RAxML with --anc-root-tree.  If you are specifying an input tree that
-# you rooted yourself (say, a reconciled species/gene tree), drop the
-# --anc-root-tree flag.
-./raxml.py anc -a alignment.phy -m `cat find-model/best-model.txt` -t ml-tree/07_final-tree.newick --anc-root-tree -o ml-anc -T 28
+# Construct ancestors on the ML tree.
+#run-raxml anc -a alignment.phy -m `cat find-model/best-model.txt` -t ml-tree/02_final-tree.newick -o ml-anc -T 28
+
+# Construct ancestors on the reconciled generax tree with supports
+#run-raxml anc -a alignment.phy -m `cat find-model/best-model.txt` -t generax-run/reconciled-tree.newick -o ml-anc_reconciled --anc-support-tree generax-run/reconciled-tree-with-supports.newick -T 28
