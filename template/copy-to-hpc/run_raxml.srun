@@ -1,0 +1,24 @@
+#!/bin/bash -l
+#SBATCH --account=harmslab      ### change this to your actual account for charging
+#SBATCH --job-name=raxml        ### job name
+#SBATCH --output=hostname.out   ### file in which to store job stdout
+#SBATCH --error=hostname.err    ### file in which to store job stderr
+#SBATCH --partition=short       ### can be short long fat longfat
+#SBATCH --time=00-01:00:00      ### Run for 1 day
+#SBATCH --nodes=1               ### Run on a single node
+#SBATCH --ntasks-per-node=1     ### Run one job on the node
+#SBATCH --cpus-per-task=28      ### Use 28 cores to run job (should match threads below)
+
+module load gcc
+
+# Find the best phylogenetic model
+run-raxml model -a alignment.phy -o find-model -T 28
+
+# Consruct the ML tree
+run-raxml ml -a alignment.phy -m `cat find-model/best-model.txt` -o ml-tree -T 28
+
+# Construct ancestors on the ML tree.
+run-raxml anc -a alignment.phy -m `cat find-model/best-model.txt` -t ml-tree/02_ml-tree.newick -o ml-anc -T 28
+
+# Construct ancestors on the reconciled generax tree with supports
+#run-raxml anc -a alignment.phy -m `cat find-model/best-model.txt` -t generax-run/reconciled-tree.newick -o ml-anc_reconciled --anc-support-tree generax-run/reconciled-tree-with-supports.newick -T 28
