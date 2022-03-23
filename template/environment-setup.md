@@ -23,6 +23,8 @@
     + Download the latest windows blast binary from https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/. (Look for win64 in the filename).
     + Run the installer. It should install the software in some place like `C:\Program Files\NCBI\blast-2.12.0+\bin\`
     + Update your windows path to point to this folder. Instructions are [here](https://www.c-sharpcorner.com/article/add-a-directory-to-path-environment-variable-in-windows-10/). 
+    
++ Install topiary XX
 
 #### Create a local copy of the human proteome for reverse BLASTing
 
