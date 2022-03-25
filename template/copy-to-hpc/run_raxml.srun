@@ -12,13 +12,13 @@
 module load gcc
 
 # Find the best phylogenetic model
-run-raxml model -c topiary.csv -o find-model -T 28
+run-raxml model -c 07_seq-database.csv -o find-model -T 28
 
 # Consruct the ML tree
-run-raxml ml -c topiary.csv -m `cat find-model/best-model.txt` -o ml-tree -T 28
+run-raxml ml -c 07_seq-database.csv -m `cat find-model/best-model.txt` -o ml-tree -T 28
 
 # Construct ancestors on the ML tree.
-run-raxml anc -c topiary.csv -m `cat find-model/best-model.txt` -t ml-tree/02_ml-tree.newick -o ml-anc -T 28
+run-raxml anc -c 07_seq-database.csv -m `cat find-model/best-model.txt` -t ml-tree/02_ml-tree.newick -o ml-anc -T 28
 
 # Construct ancestors on the reconciled generax tree with supports
-#run-raxml anc -c topiary.csv -m `cat find-model/best-model.txt` -t generax-run/reconciled-tree.newick -o ml-anc_reconciled --anc-support-tree generax-run/reconciled-tree-with-supports.newick -T 28
+#run-raxml anc -c 07_seq-database.csv -m `cat find-model/best-model.txt` -t generax-trees/reconciled-tree.newick -o ml-anc_reconciled --anc-support-tree generax-trees/reconciled-tree-with-supports.newick -T 28

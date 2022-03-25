@@ -12,9 +12,14 @@ def to_pretty(row):
     try:
         pretty = f"{row.paralog}|{row.species}|{row.accession}"
     except AttributeError:
-        err = "\n\nrow does not have all required attributes:"
-        err += " (paralog, species, accession)\n"
-        raise ValueError(err)
+        try:
+            pretty = f"{row.protein}|{row.species}|{row.accession}"
+        except AttributeError:
+            err = "\n\nrow does not have all required attributes:"
+            err += " (paralog, species, accession)\n"
+            raise ValueError(err)
+
+    pretty = re.sub("[,:;\"\'\(\)\.]","-",pretty)
 
     return pretty
 

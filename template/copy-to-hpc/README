@@ -13,9 +13,9 @@ topiary .csv file and do the following:
 1. Create a directory to run generax. Note the --bs-dir argument is optional and
    controls whether or not you run on bootstrap replicates.
 
-   setup-generax -c topiary-df.csv -m `cat find-model/best-model.txt` -t ml-tree/02_ml-tree.newick -o generax-run --bs-dir ml-tree/01_make-ml-tree
+   setup-generax -c topiary-df.csv -m `cat find-model/best-model.txt` -t ml-tree/02_ml-tree.newick -o generax-trees --bs-dir ml-tree/01_make-ml-tree
 
-2. After creating the generax-run directory, cd into it. You should see a script
+2. After creating the generax-trees directory, cd into it. You should see a script
    called 00_launch_generax_bootstrap.sh. This will launch generax on blocks of
    bootstrap replicates as individual slurm jobs. It takes a single argument
    which controls how many bootstrap reps are launched per job. The smaller the
